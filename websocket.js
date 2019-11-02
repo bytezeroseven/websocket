@@ -2,14 +2,16 @@
 
 let crypto = require("crypto");
 
-let events = require("events");
+let EventEmitter = require("events").EventEmitter;
 
 let MAGIC_KEY = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+
+
 function upgradeServer(httpServer) {
 
-	let serverEmitter = new events.EventEmitter();
-	serverEmitter.clients = [];
+	let wss = new EventEmitter();
+	wss.clients = [];
 
 	httpServer.on("upgrade", function(request, response) {
 
@@ -39,33 +41,34 @@ function upgradeServer(httpServer) {
 
 		}
 
-		let clientEmitter = new events.EventEmitter();
+		let ws = new EventEmitter();
 
-		serverEmitter.clients.push(clientEmitter);
-
-		clientEmitter.send = function(data) {
+		ws.send = function(data) {
 
 			let opCode = typeof data == "string" ? 0x01 : 0x02;
 
-			send(createFrame(data, opCode));
+			let frame = createFrame(opCode, data);
+
+			send(frame);
 
 		}
 
-		clientEmitter.ping = function() {	
+		ws.ping = function() {	
 
-			send(createFrame("", 0x09));
+			send(createFrame(0x09));
 
 		}
 
-		clientEmitter.close = function() {
+		ws.close = function() {
 
 			end();
 
 		}
 
-		clientEmitter.binaryType = "nodebuffer";
+		ws.binaryType = "nodebuffer";
 
-		serverEmitter.emit("connection", clientEmitter);
+		wss.clients.push(ws);
+		wss.emit("connection", clientEmitter);
 
 		let fin = false;
 
@@ -150,14 +153,16 @@ function upgradeServer(httpServer) {
 
 			response.end();
 
+			response.on("data", function() { return false; });
+
 			buffers = [];
 
 			payloads = [];
 
-			let i = serverEmitter.clients.indexOf(clientEmitter);
-			i > 0 && serverEmitter.clients.splice(i, 1);
+			let i = wss.clients.indexOf(ws);
+			i > 0 && wss.clients.splice(i, 1);
 
-			clientEmitter.emit("disconnect");
+			ws.emit("close");
 
 		}
 
@@ -248,11 +253,7 @@ function upgradeServer(httpServer) {
 
 						if (opCode > 0x07) {
 
-							if (opCode === 0xA) {
-								clientEmitter.emit("pong");
-							}
-
-							return false;
+							return handleControlFrame();
 
 						}
 
@@ -272,31 +273,7 @@ function upgradeServer(httpServer) {
 
 						if (fin) {
 
-							let finalPayload = Buffer.concat(payloads);
-
-							if (opCode === 0x01) {
-
-								clientEmitter.emit("message", finalPayload.toString("utf8"));
-
-							} else if (opCode === 0x02) {
-
-								if (clientEmitter.binaryType == "nodebuffer") {
-									clientEmitter.emit("message", finalPayload);
-								} else if (clientEmitter.binaryType == "arraybuffer") {
-
-									let arraybuffer = finalPayload.buffer;
-
-									if (arraybuffer.byteLength == finalPayload.byteLength) {
-									} else {
-										arraybuffer = arraybuffer.slice(finalPayload.byteOffset, finalPayload.byteOffset + finalPayload.byteLength);
-									}
-
-									clientEmitter.emit("message", arraybuffer);
-
-								}
-
-								
-							}
+							emitMessage();
 
 						}
 
@@ -312,16 +289,56 @@ function upgradeServer(httpServer) {
 
 		}
 
+		function handleControlFrame() {
+
+			if (opCode === 0xA) {
+				ws.emit("pong");
+			}
+
+		}
+
+		function emitMessage() {
+
+			let finalPayload = Buffer.concat(payloads);
+
+			if (opCode === 0x01) {
+
+				ws.emit("message", finalPayload.toString("utf8"));
+
+			} else if (opCode === 0x02) {
+
+				if (ws.binaryType == "nodebuffer") {
+					ws.emit("message", finalPayload);
+				} else if (ws.binaryType == "arraybuffer") {
+
+					let arraybuffer = finalPayload.buffer;
+
+					if (arraybuffer.byteLength == finalPayload.byteLength) {
+					} else {
+						arraybuffer = arraybuffer.slice(finalPayload.byteOffset, finalPayload.byteOffset + finalPayload.byteLength);
+					}
+
+					ws.emit("message", arraybuffer);
+
+				}
+
+				
+			}
+
+		}
+
 		response.on("data", onSocketData);
 
 	});
 
-	return serverEmitter;
+	return wss;
 
 }
 
 
-function createFrame(data, opCode) {
+function createFrame(opCode, data) {
+
+	if (data == null) data = "";
 
 	let buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
 
