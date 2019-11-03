@@ -1,44 +1,58 @@
 # websocket
 WebSocket implementation with most of the important stuff. No libraries used.
 
-## Example code
+## Example code:
+Server:
 
-	let websocket = require("./websocket.js");
-	let wss = websocket.upgradeServer(server);
+	let websocketHelper = require("./websocket.js");
+	let wss = websocketHelper.upgradeServer(server);
 
 	wss.on("connection", function(ws) {
-		ws.binaryType = "nodebuffer" || "arraybuffer";
+		ws.binaryType = "arraybuffer" || "nodebuffer";
+
+		ws.send("Hello!");
+
+		let ab = new ArrayBuffer(1);
+		let view = new DataView(ab);
+		view.setUint8(0, 0b1000101);
+		ws.send(ab);
+		ws.send(view);
 
 		ws.ping();
 		ws.on("pong", function() {
 			ws.ping();
 		});
-		
-		// String message
-		ws.send("I am probably done with this project, but I keep committing useless commits.");
-		
-		let json = {
-			x: 34,
-			y: 67,
-			nickname: "double mega pro lvl 33 pro sniper"
-		};
-		
-		ws.send(JSON.stringify(json));
-		
-		// Binary message
-		let arraybuffer = new ArrayBuffer(1);
-		let view = new DataView(arraybuffer);
-		
-		view.setUint8(0b1000101, 0);
-		
-		ws.send(arraybuffer);
 
-		ws.on("message", function(msg) {
-			console.log(msg);
+		ws.close();
+
+		ws.on("message", function(data) {
+			console.log(data);
 		});
 
 		ws.on("close", function() {
 			console.log("Ws Connection was closed.");
 		});
 	});
-`
+
+Client:
+
+	let ws = new WebSocket(location.origin.replace("http", "ws"));
+	ws.binaryType = "arraybuffer";
+
+	ws.onopen = function() {
+		console.log("WebSocket open!");
+		ws.send("Hey!");
+	}
+
+	ws.onclose = function() {
+		console.log("WebSocket closed.");
+	}
+
+	ws.onmessage = function(evt) {
+		let msg = evt.data;
+		console.log(msg);
+		if (msg instanceof ArrayBuffer) {
+			let view = new DataView(msg);
+			console.log(view.getUint8(0));
+		}
+	}
