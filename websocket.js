@@ -35,9 +35,9 @@ function upgradeServer(httpServer) {
 
 		response.write(headers.join("\r\n") + "\r\n\r\n");
 
-		function send(frame) {
+		function sendFrame(frame) {
 
-			response.write(frame);
+			!response.finished && response.write(frame);
 
 		}
 
@@ -47,15 +47,13 @@ function upgradeServer(httpServer) {
 
 			let opCode = typeof data == "string" ? 0x01 : 0x02;
 
-			let frame = createFrame(opCode, data);
-
-			send(frame);
+			sendFrame(createFrame(opCode, data));
 
 		}
 
 		ws.ping = function() {	
 
-			send(createFrame(0x09));
+			sendFrame(createFrame(0x09));
 
 		}
 
@@ -159,6 +157,8 @@ function upgradeServer(httpServer) {
 
 			payloads = [];
 
+			state = 8;
+
 			let i = wss.clients.indexOf(ws);
 			i > 0 && wss.clients.splice(i, 1);
 
@@ -191,12 +191,6 @@ function upgradeServer(httpServer) {
 						mask = bytes[1] & 0x80;
 
 						payloadLength = bytes[1] & 0x7f;
-
-						if (opCode === 0x08) {
-
-							return end();
-
-						}
 
 						let isFragmented = payloads.length > 0;
 
@@ -292,7 +286,13 @@ function upgradeServer(httpServer) {
 		function handleControlFrame() {
 
 			if (opCode === 0xA) {
+
 				ws.emit("pong");
+
+			} else if (opCode == 0x08) {
+
+				return end();
+
 			}
 
 		}
@@ -300,6 +300,8 @@ function upgradeServer(httpServer) {
 		function emitMessage() {
 
 			let finalPayload = Buffer.concat(payloads);
+
+			payloads = [];
 
 			if (opCode === 0x01) {
 
@@ -316,13 +318,14 @@ function upgradeServer(httpServer) {
 					ws.emit("message", toArrayBuffer(finalPayload));
 
 				}
-
 				
 			}
 
 		}
 
 		response.on("data", onSocketData);
+
+		response.on("error", function(err) { end(); });
 
 	});
 
