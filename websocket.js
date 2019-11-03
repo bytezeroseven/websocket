@@ -68,7 +68,7 @@ function upgradeServer(httpServer) {
 		ws.binaryType = "nodebuffer";
 
 		wss.clients.push(ws);
-		wss.emit("connection", clientEmitter);
+		wss.emit("connection", ws);
 
 		let fin = false;
 
@@ -251,6 +251,8 @@ function upgradeServer(httpServer) {
 
 						if (bufferedBytes < payloadLength) return false;
 
+						currentstate = 0;
+
 						if (opCode > 0x07) {
 
 							return handleControlFrame();
@@ -276,8 +278,6 @@ function upgradeServer(httpServer) {
 							emitMessage();
 
 						}
-
-						currentstate = 0;
 					
 					break;
 					
@@ -308,17 +308,12 @@ function upgradeServer(httpServer) {
 			} else if (opCode === 0x02) {
 
 				if (ws.binaryType == "nodebuffer") {
+					
 					ws.emit("message", finalPayload);
+
 				} else if (ws.binaryType == "arraybuffer") {
 
-					let arraybuffer = finalPayload.buffer;
-
-					if (arraybuffer.byteLength == finalPayload.byteLength) {
-					} else {
-						arraybuffer = arraybuffer.slice(finalPayload.byteOffset, finalPayload.byteOffset + finalPayload.byteLength);
-					}
-
-					ws.emit("message", arraybuffer);
+					ws.emit("message", toArrayBuffer(finalPayload));
 
 				}
 
@@ -335,12 +330,48 @@ function upgradeServer(httpServer) {
 
 }
 
+function toArrayBuffer(nodeBuffer) {
+
+	if (nodeBuffer.buffer.byteLength == nodeBuffer.byteLength) {
+		return nodeBuffer.buffer;
+	} else {
+		return nodeBuffer.buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
+	}
+
+} 
+
+function toNodeBuffer(data) {
+
+	if (Buffer.isBuffer(data)) return data;
+
+	if (data instanceof ArrayBuffer) {
+
+		return Buffer.from(data);
+
+	} else if (data instanceof DataView) {
+
+		let buffer = Buffer.from(data.buffer);
+
+		if (data.byteLength == buffer.byteLength) {
+			return buffer;
+		} else {
+			buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+		}
+
+	} else {
+
+		return Buffer.from(data);
+
+	}
+
+}
+
 
 function createFrame(opCode, data) {
 
 	if (data == null) data = "";
 
-	let buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+	let buffer = toNodeBuffer(data);
 
 	let byteLength = buffer.byteLength;
 
