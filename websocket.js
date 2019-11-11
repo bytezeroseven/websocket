@@ -6,420 +6,365 @@ let EventEmitter = require("events").EventEmitter;
 
 let MAGIC_KEY = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
+let CONNECTING = 0;
+let OPEN = 1;
+let CLOSING = 2;
+let CLOSED = 3;
 
+class Client {
 
-function upgradeServer(httpServer) {
+	constructor(request, socket) {
 
-	let wss = new EventEmitter();
-	wss.clients = [];
+		this.request = request;
+		this.id = request.headers["sec-websocket-key"];
+		this.socket = socket;
+		this.binaryType = "nodebuffer";
+		this.readyState = CONNECTING;
 
-	httpServer.on("upgrade", function(request, response) {
+		this.fin = false;
+		this.rsv1 = null;
+		this.rsv2 = null;
+		this.rsv3 = null;
+		this.opCode = 0x00;
+		this.payloadLength = 0;
+		this.mask = false;
+		this.maskingKey = 0;
 
-		if (request.headers["upgrade"] != "websocket") return false;
+		this.buffers = [];
+		this.payloads = [];
+		this.bufferedBytes = 0;
 
-		let acceptKey = request.headers["sec-websocket-key"];
+		this.frameReadState = 0;
 
+	}
+
+	send(data) {
+		this.socket.write(createFrame({
+			opCode: typeof data == "string" ? 0x01 : 0x02,
+			payload: data
+		}));
+	}
+
+	close() {
+		this.socket.end();
+		this.readyState = CLOSING;
+	}
+
+	ping() {
+		this.socket.write(createFrame({
+			opCode: 0x09,
+			payload: ""
+		}));
+	} 
+
+	consume(n) {
+		this.bufferedBytes -= n;
+
+		let destination = Buffer.alloc(n);
+
+		while (n > 0) {
+
+			let buf = this.buffers[0];
+
+			if (n < buf.length) {
+				buf.copy(destination, destination.length - n, 0, n);
+				this.buffers[0] = buf.slice(n);
+			} else {
+				this.buffers.shift().copy(destination, destination.length - n);
+			}
+
+			n -= buf.length;
+
+		}
+
+		return destination;
+	}
+
+	doHandshake() {
+
+		let acceptKey = this.request.headers["sec-websocket-key"];
 		let generatedKey = crypto.createHash("sha1").update(acceptKey + MAGIC_KEY).digest("base64");
 
 		let headers = [
-
 			"HTTP/1.1 101 Websocket Protocol Upgrade",
-		
 			"Sec-Websocket-Accept:" + generatedKey,
-		
 			"Connection: Upgrade",
-
 			"Upgrade: Websocket"
-
 		];
 
-		response.write(headers.join("\r\n") + "\r\n\r\n");
+		this.socket.write(headers.join("\r\n") + "\r\n\r\n");
+		this.readyState = OPEN;
 
-		function sendFrame(frame) {
+	}
 
-			!response.finished && response.write(frame);
+	addSocketListeners() {
 
+		this.socket.on("error", (err) => { this.close(); });
+
+		this.socket.on("close", () => {
+			this.readyState = CLOSED;
+			this.frameReadState = 500;
+			this.payloads = [];
+			this.buffers = [];
+			this.socket.on("data", function() { return false; });
+			this.socket.on("close", function() { return false; });
+			this.onclose();
+		})
+
+		/* DATA READING */
+
+		this.socket.on("data", (buf) => {
+
+			this.buffers.push(buf);
+			this.bufferedBytes += buf.byteLength;
+
+			this.startReadLoop();
+
+		});
+
+	}
+
+	parseMessage() {
+
+		let msg = Buffer.concat(this.payloads);
+		this.payloads = [];
+
+		if (this.opCode === 0x01) {
+			this.onmessage(msg.toString());
+		} else if (this.opCode === 0x02) {
+			if (this.binaryType == "nodebuffer") this.onmessage(msg);
+			else this.onmessage(toArrayBuffer(msg));
 		}
 
-		let ws = new EventEmitter();
+	}
 
-		ws.send = function(data) {
-
-			let opCode = typeof data == "string" ? 0x01 : 0x02;
-
-			sendFrame(createFrame(opCode, data));
-
+	handleControlFrame() {
+		if (this.opCode === 0xA) {
+			this.onpong();
+		} else if (this.opCode == 0x08) {
+			this.close();
 		}
+	}
 
-		ws.ping = function() {	
-
-			sendFrame(createFrame(0x09));
-
-		}
-
-		ws.close = function() {
-
-			end();
-
-		}
-
-		ws.binaryType = "nodebuffer";
-
-		wss.clients.push(ws);
-		wss.emit("connection", ws);
-
-		let fin = false;
-
-		let rsv1 = null;
+	startReadLoop() {
+		for ( ; ; ) {
 		
-		let rsv2 = null;
-		
-		let rsv3 = null;
-
-		let opCode = null;
-		
-		let payloadLength = 0;
-		
-		let mask = false;
-		
-		let maskingKey = null;
-
-
-		let currentstate = 0;
-
-		let buffers = [];
-
-		let payloads = [];
-
-		let bufferedBytes = 0;
-
 		let bytes = null;
 
-		function consume(n) {
+		switch (this.frameReadState) {
 
-			bufferedBytes -= n;
+			case 0:
 
-			if (n === buffers[0].length) return buffers.shift();
+				if (this.bufferedBytes < 2) return false;
 
-			if (n < buffers[0].length) {
+				bytes = this.consume(2);
 
-				let result = buffers[0].slice(0, n);
+				this.fin = bytes[0] & 0x80;
+				this.rsv1 = bytes[0] & 0x40;
+				this.rsv2 = bytes[0] & 0x20;
+				this.rsv3 = bytes[0] & 0x10;
+				this.opCode = bytes[0] & 0x0f;
+				this.mask = bytes[1] & 0x80;
+				this.payloadLength = bytes[1] & 0x7f;
 
-				buffers[0] = buffers[0].slice(n);
+				let isFragmented = this.payloads.length > 0;
 
-				return result;
+				if (this.opCode > 0x07) {
 
-			}
+					if (!this.fin) return this.close();
+					else if (this.payloadLength > 125) return this.close();
 
-			let destination = Buffer.alloc(n);
+				} else if (this.opCode === 0x00 && isFragmented == false) {
+					return this.close();
+				}
 
-			while (n > 0) {
+				this.frameReadState = 1;
 
-				let buffer = buffers[0];
+			case 1:
 
-				if (n < buffers[0].length) {
+				if (this.payloadLength === 126) {
+					if (this.bufferedBytes < 2) return false;
 
-					buffer.copy(destination, destination.length - n, 0, n);
+					bytes = this.consume(2);
+					this.payloadLength = bytes.readUInt16BE(0);
 
-					buffers[0] = buffer.slice(n);
+				} else if (this.payloadLength === 127) {
+					if (this.bufferedBytes < 8) return false;
 
-				} else {
-
-					buffers.shift().copy(destination, destination.length - n);
+					bytes = this.consume(8);
+					this.payloadLength = Math.pow(2, 32) * bytes.readUInt32BE(0) + bytes.readUInt32BE(4);
 
 				}
 
-				n -= buffer.length;
+				this.frameReadState = 2;
 
-			}
+			case 2:
 
-			return destination;
-
-		}
-
-		function onSocketData(data) {
-
-			bufferedBytes += data.length;
-
-			buffers.push(data);
-
-			startReadLoop();
-
-		}
-
-		function end() {
-
-			response.end();
-
-			response.on("data", function() { return false; });
-
-			buffers = [];
-
-			payloads = [];
-
-			state = 8;
-
-			let i = wss.clients.indexOf(ws);
-			i > 0 && wss.clients.splice(i, 1);
-
-			ws.emit("close");
-
-		}
-
-		function startReadLoop() {
-
-			for ( ; ; ) {
-
-				switch (currentstate) {
-
-					case 0:
-
-						if (bufferedBytes < 2) return false;
-
-						bytes = consume(2);
-
-						fin = bytes[0] & 0x80;
-
-						rsv1 = bytes[0] & 0x40;
-
-						rsv2 = bytes[0] & 0x20;
-
-						rsv3 = bytes[0] & 0x10;
-
-						opCode = bytes[0] & 0x0f;
-
-						mask = bytes[1] & 0x80;
-
-						payloadLength = bytes[1] & 0x7f;
-
-						let isFragmented = payloads.length > 0;
-
-						if (opCode > 0x07) {
-
-							if (!fin) return end();
-							if (payloadLength > 125) return end();
-
-						} else if (fin === 0x00 && !isFragmented) {
-
-							return end();
-
-						}
-
-						currentstate = 1;
-
-					case 1:
-
-						if (payloadLength === 126) {
-
-							if (bufferedBytes < 2) return false;
-
-							bytes = consume(2);
-
-							payloadLength = bytes.readUInt16BE(0);
-
-						} else if (payloadLength === 127) {
-
-							if (bufferedBytes < 8) return false;
-
-							bytes = consume(8);
-
-							payloadLength = Math.pow(2, 32) * bytes.readUInt32BE(0) + bytes.readUInt32BE(4);
-
-						}
-
-						currentstate = 2;
-
-					case 2:
-
-						if (mask) {
-
-							if (bufferedBytes < 4) return false;
-
-							maskingKey = consume(4);
-
-						}
-
-						currentstate = 3;
-
-					case 3:
-
-						if (bufferedBytes < payloadLength) return false;
-
-						currentstate = 0;
-
-						if (opCode > 0x07) {
-
-							return handleControlFrame();
-
-						}
-
-						let payload = consume(payloadLength);
-
-						if (mask) {
-
-							for (let i = 0; i < payloadLength; i++) {
-
-								payload[i] ^= maskingKey[i % 4];
-
-							}
-
-						}
-
-						payloads.push(payload);
-
-						if (fin) {
-
-							emitMessage();
-
-						}
-					
-					break;
-					
-					default: return false;
-
-				}			
-
-			}
-
-		}
-
-		function handleControlFrame() {
-
-			if (opCode === 0xA) {
-
-				ws.emit("pong");
-
-			} else if (opCode == 0x08) {
-
-				return end();
-
-			}
-
-		}
-
-		function emitMessage() {
-
-			let finalPayload = Buffer.concat(payloads);
-
-			payloads = [];
-
-			if (opCode === 0x01) {
-
-				ws.emit("message", finalPayload.toString("utf8"));
-
-			} else if (opCode === 0x02) {
-
-				if (ws.binaryType == "nodebuffer") {
-					
-					ws.emit("message", finalPayload);
-
-				} else if (ws.binaryType == "arraybuffer") {
-
-					ws.emit("message", toArrayBuffer(finalPayload));
-
+				if (this.mask) {
+					if (this.bufferedBytes < 4) return false;
+					this.maskingKey = this.consume(4);
 				}
-				
-			}
 
-		}
+				this.frameReadState = 3;
 
-		response.on("data", onSocketData);
+			case 3:
 
-		response.on("error", function(err) { end(); });
+				if (this.bufferedBytes < this.payloadLength) return false;
+				this.frameReadState = 0;
 
-	});
+				if (this.opCode > 0x07) {
+					return this.handleControlFrame();
+				}
 
-	return wss;
+				let payload = this.consume(this.payloadLength);
+
+				if (this.mask) {
+					for (let i = 0; i < this.payloadLength; i++) {
+						payload[i] ^= this.maskingKey[i % 4];
+					}
+				}
+
+				this.payloads.push(payload);
+
+				if (this.fin) {
+					this.parseMessage();
+				}
+			
+			break;
+			default: return false;
+
+		}}
+	}
+
+	onerror() { }
+	onmessage() { }
+	onclose() { }
+	onopen() { }
+
+	onpong() {};
 
 }
 
-function toArrayBuffer(nodeBuffer) {
+class Server {
 
-	if (nodeBuffer.buffer.byteLength == nodeBuffer.byteLength) {
-		return nodeBuffer.buffer;
-	} else {
-		return nodeBuffer.buffer.slice(nodeBuffer.byteOffset, nodeBuffer.byteOffset + nodeBuffer.byteLength);
+	constructor(options) {
+
+		this.httpServer = options.server;
+		this.clients = [];
+		this.options = options;
+
+		this.upgradeServer();
+
 	}
 
-} 
+	upgradeServer() {
+
+		this.httpServer.on("upgrade", (request, socket) => {
+
+			if (request.headers["upgrade"] != "websocket") return false;
+
+			let client = new Client(request, socket);
+			this.clients.push(client);
+
+			client.doHandshake();
+			client.addSocketListeners();
+
+			socket.on("close", () => {
+
+				let i = this.clients.indexOf(client);
+				if (i > -1) this.clients.splice(i, 1);
+
+			});
+
+			this.onconnection(client);
+
+		});
+
+	}
+
+	onconnection(ws) {}
+
+}
 
 function toNodeBuffer(data) {
 
 	if (Buffer.isBuffer(data)) return data;
+	else if (ArrayBuffer.isView(data)) {
 
-	if (data instanceof ArrayBuffer) {
-
-		return Buffer.from(data);
-
-	} else if (data instanceof DataView) {
-
-		let buffer = Buffer.from(data.buffer);
-
-		if (data.byteLength == buffer.byteLength) {
-			return buffer;
+		let result = Buffer.from(data.buffer);
+		if (result.byteLength === data.byteLength) {
+			return result;
 		} else {
-			buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+
+			return result.slice(data.byteOffset, data.byteOffset, data.byteLength);
+
 		}
 
 	} else {
-
 		return Buffer.from(data);
+	}
 
+} 
+
+function toArrayBuffer(buf) {
+
+	if (buf.byteLength == buf.buffer.byteLength) {
+		return buf.buffer;
+	} else {
+		return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
 	}
 
 }
 
+function createFrame({ payload, opCode }) {
 
-function createFrame(opCode, data) {
-
-	if (data == null) data = "";
-
-	let buffer = toNodeBuffer(data);
-
-	let byteLength = buffer.byteLength;
-
+	let buf = toNodeBuffer(payload);
+	let byteLength = buf.byteLength;
 	let payloadLength = byteLength;
-
 	let n = 0;
 
-	if (byteLength > 125) {
+	if (payloadLength > 125) {
 
-		if (byteLength < 65536) {
-
+		if (payloadLength < 65536) {
 			payloadLength = 126;
 			n += 2;
 
 		} else {
-
 			payloadLength = 127;
 			n += 8;
-
 		}
 
 	}
 
-	let header = Buffer.alloc(1 + 1 + n);
+	let header = Buffer.alloc(n + 2);
 
-	header[0] = opCode | 0x80;
+	header[0] = 0x80;
+	header[0] |= opCode;
+
 	header[1] = payloadLength;
 
-	if (n === 2) {
-	
-		headerBuffer.writeUInt16BE(byteLength, 2);
-	
-	} else if (n === 8) {
-		
-		headerBuffer.writeUInt32BE(byteLength, 2 + 4);
-	
+	if (payloadLength == 126) {
+		header.writeUInt16BE(byteLength, 2);
+	} else if (payloadLength == 127) {
+		header.writeUInt32BE(byteLength, 2 + 4);
 	}
 
-	return Buffer.concat([header, buffer]);
+	let frame = Buffer.concat([header, buf]);
+
+	return frame;
 
 }
 
 module.exports = {
 
-	upgradeServer: upgradeServer
+	Client, 
+	Server,
+	createFrame,
+	MAGIC_KEY,
+	CONNECTING,
+	OPEN,
+	CLOSING,
+	CLOSED
 
-}
+};
 
