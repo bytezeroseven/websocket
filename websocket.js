@@ -247,11 +247,10 @@ class Client {
 
 class Server {
 
-	constructor(options) {
+	constructor(httpServer) {
 
-		this.httpServer = options.server;
+		this.httpServer = httpServer;
 		this.clients = [];
-		this.options = options;
 
 		this.upgradeServer();
 
