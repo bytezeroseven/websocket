@@ -11,11 +11,11 @@ WebSocket implementation with most of the important stuff. No libraries used.
 			socket.send("Hello!");
 		}
 		
-		ws.onmessage = function(data) {
+		socket.onmessage = function(data) {
 			console.log(data);
 		}
 
-		ws.onclose = function() {
+		socket.onclose = function() {
 			console.log("A WebSocket connection was closed");
 		}
 	}
