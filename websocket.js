@@ -2,8 +2,6 @@
 
 let crypto = require("crypto");
 
-let EventEmitter = require("events").EventEmitter;
-
 let MAGIC_KEY = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 let CONNECTING = 0;
